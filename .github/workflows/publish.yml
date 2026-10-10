@@ -1,0 +1,166 @@
+name: Publish Qt for FreeBSD
+
+on:
+  workflow_dispatch:
+    inputs:
+      qt-version:
+        description: Official released Qt source version (minimum 6.12)
+        required: true
+        default: '6.12.0'
+      source-sha256:
+        description: SHA-256 of the matching official qt-everywhere source archive
+        required: true
+        default: '98ff4f44bac6ec3e1e62ee2a4316ae0e3d15badb015d753cc0268a20db52f165'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qt-freebsd-publisher
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    outputs:
+      release: ${{ steps.identity.outputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Validate selected source identity
+        id: identity
+        env:
+          QT_VERSION: ${{ inputs.qt-version }}
+          QT_SOURCE_SHA256: ${{ inputs.source-sha256 }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+          sys.path.insert(0, 'scripts')
+          from sdk import version
+          selected = os.environ['QT_VERSION']
+          if not re.fullmatch(r'6\.\d+\.\d+', selected) or version(selected) < version('6.12'):
+              raise SystemExit('Select a released Qt 6 version >= 6.12')
+          if not re.fullmatch(r'[0-9a-f]{64}', os.environ['QT_SOURCE_SHA256']):
+              raise SystemExit('The official source SHA-256 must contain 64 lowercase hex digits')
+          tag = f"qt-{selected}-freebsd-15-amd64-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'release={tag}\n')
+          PY
+
+      - name: Build the installed Qt SDK
+        uses: vmactions/freebsd-vm@v1
+        env:
+          QT_VERSION: ${{ inputs.qt-version }}
+          QT_SOURCE_SHA256: ${{ inputs.source-sha256 }}
+          QT_SDK_RELEASE: ${{ steps.identity.outputs.release }}
+        with:
+          release: '15'
+          arch: amd64
+          cpu: 2
+          envs: 'QT_VERSION QT_SOURCE_SHA256 QT_SDK_RELEASE'
+          prepare: |
+            set -eu
+            pkg bootstrap -fy
+            mkdir -p /usr/local/etc/pkg/repos
+            echo 'FreeBSD-ports: { enabled: no }' > /usr/local/etc/pkg/repos/FreeBSD-ports.conf
+            echo 'FreeBSD: { url: https://pkg.FreeBSD.org/${ABI}/latest }' > /usr/local/etc/pkg/repos/FreeBSD.conf
+            pkg update -f
+            pkg install -y git cmake ninja pkgconf python3 perl5
+          run: |
+            set -eu
+            xargs pkg install -y < runtime-packages.txt
+            sh scripts/build_sdk.sh "$QT_VERSION" "$QT_SOURCE_SHA256" "$QT_SDK_RELEASE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qt-freebsd-release
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: qt-freebsd-release
+          path: dist
+
+      - name: Verify the archive in a clean FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: '15'
+          arch: amd64
+          cpu: 2
+          prepare: |
+            set -eu
+            pkg bootstrap -fy
+            mkdir -p /usr/local/etc/pkg/repos
+            echo 'FreeBSD-ports: { enabled: no }' > /usr/local/etc/pkg/repos/FreeBSD-ports.conf
+            echo 'FreeBSD: { url: https://pkg.FreeBSD.org/${ABI}/latest }' > /usr/local/etc/pkg/repos/FreeBSD.conf
+            pkg update -f
+            pkg install -y cmake ninja pkgconf python3 xauth xorg-vfbserver
+          run: |
+            set -eu
+            export CMAKE_BUILD_PARALLEL_LEVEL=2
+            python3 scripts/sdk.py install --directory dist --minimum-qt-version 6.12
+            /opt/qt-freebsd/bin/qsb --version
+            cmake -S smoke -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/opt/qt-freebsd
+            cmake --build build --parallel 2
+            Xvfb :99 -screen 0 1280x1024x24 >/tmp/qt-freebsd-xvfb.log 2>&1 &
+            trap 'kill $!' EXIT
+            export DISPLAY=:99
+            # Xvfb readiness is bounded; a producer cannot publish an untested GUI SDK.
+            attempts=0
+            until test -S /tmp/.X11-unix/X99; do
+              attempts=$((attempts + 1))
+              test "$attempts" -lt 30
+              sleep 1
+            done
+            QT_QPA_PLATFORM=xcb QSG_RHI_BACKEND=opengl ./build/qt_freebsd_sdk_smoke
+            QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software ./build/qt_freebsd_sdk_smoke
+
+  publish:
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: qt-freebsd-release
+          path: dist
+      - name: Publish the complete versioned SDK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          QT_SDK_RELEASE: ${{ needs.build.outputs.release }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path('dist/sdk.json').read_text())
+          Path('release-notes.txt').write_text(
+              f"Qt {manifest['qt_version']} for {manifest['abi']}, shared Release, XCB/OpenGL.\n\n"
+              f"Built on {manifest['freebsd_userland']}; install to {manifest['prefix']}.\n"
+              'Includes qtbase, qtdeclarative and qtshadertools.\n'
+              'sdk.json records source, compiler and package identity; SHA256SUMS covers every payload.\n'
+              'The matching official Qt source archive is attached separately.\n'
+              f"Producer: {manifest['producer_run']}\n", encoding='utf-8')
+          PY
+          gh release create "$QT_SDK_RELEASE" --target "$GITHUB_SHA" --draft \
+            --title "$QT_SDK_RELEASE" --notes-file release-notes.txt dist/*
+          gh release edit "$QT_SDK_RELEASE" --draft=false --latest

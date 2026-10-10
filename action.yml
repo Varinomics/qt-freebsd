@@ -1,0 +1,35 @@
+name: Acquire Qt for FreeBSD
+description: Download a published FreeBSD Qt SDK without compiling Qt.
+inputs:
+  minimum-qt-version:
+    description: Minimum Qt version required by the consumer.
+    required: true
+  directory:
+    description: Download directory beneath the consumer workspace.
+    default: .qt-freebsd
+  token:
+    description: Optional GitHub token for API rate limits; assets are public.
+    default: ${{ github.token }}
+outputs:
+  directory:
+    description: Absolute workspace directory containing the SDK and installer.
+    value: ${{ steps.fetch.outputs.directory }}
+  prefix:
+    description: Installation prefix inside the FreeBSD VM.
+    value: ${{ steps.fetch.outputs.prefix }}
+  release:
+    description: Published release selected for this acquisition.
+    value: ${{ steps.fetch.outputs.release }}
+runs:
+  using: composite
+  steps:
+    - id: fetch
+      shell: bash
+      env:
+        QT_SDK_ACTION: ${{ github.action_path }}
+        QT_SDK_DIRECTORY: ${{ inputs.directory }}
+        QT_SDK_MINIMUM: ${{ inputs.minimum-qt-version }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        python3 "$QT_SDK_ACTION/scripts/sdk.py" fetch \
+          --directory "$QT_SDK_DIRECTORY" --minimum-qt-version "$QT_SDK_MINIMUM"
