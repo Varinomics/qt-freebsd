@@ -1,5 +1,6 @@
 mesa-libs
 mesa-dri
+libglvnd
 fontconfig
 freetype2
 libX11
