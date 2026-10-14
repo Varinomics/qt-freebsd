@@ -84,22 +84,10 @@ building it. Use the Qt download service's published checksum for that exact
 archive. Changing Qt versions does not require changing consumer workflows when
 the new SDK satisfies their minimum and component requirements.
 
-Only the manual producer builds Qt. The workflow has no push, pull-request or
-scheduled trigger. Its jobs:
-
-1. Build with two CPUs, package the installed prefix and retain the original
-   source archive as a separate release asset.
-2. Download the produced archive into a fresh FreeBSD VM, install it through the
-   same helper as consumers, resolve its CMake components and compile/run a small
-   Quick application through XCB/OpenGL and offscreen presentation. No Qt source
-   or build tree is present in this verification VM.
-3. Create a new draft release, upload all assets and publish it as latest only
-   after verification and upload succeed. Each run has a distinct release tag;
-   the publisher never overwrites an earlier release's assets.
-
-Only the publication job receives `contents: write`; its token is not forwarded
-to the build or verification VMs. All producer runs share one concurrency group
-so two publications cannot race to update the latest release.
+The workflow verifies the packaged SDK in a fresh FreeBSD VM before publishing.
+Each run creates a distinct release tag and publishes it as latest only after
+verification and asset uploads succeed. Earlier release assets are never
+overwritten.
 
 Each release contains:
 
@@ -113,12 +101,7 @@ Each release contains:
 Qt's installed `config_*.opt` and `config_*.summary` files record the actual
 configure results. `source-build-identity.json` inside the SDK must match the
 release manifest's identity fields. Individual release assets are checked against
-GitHub's 2 GiB limit before publication. Actions artifacts carry files between
-producer jobs with one-day retention; consumers use durable release assets.
-
-After first publication, validate the consuming projects against the downloaded
-SDK using their existing FreeBSD tests. Publishing an SDK does not establish
-those projects' integration results.
+GitHub's 2 GiB limit before publication.
 
 ## Licensing
 
